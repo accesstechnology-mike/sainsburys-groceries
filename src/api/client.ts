@@ -1,11 +1,7 @@
-import { API_BASE, BASE_URL } from "../config.ts";
-import {
-  ApiError,
-  FetchTransport,
-  NoSessionError,
-  PageTransport,
-  type Transport,
-} from "./transport.ts";
+import { API_BASE } from "../config.ts";
+import { classifyResponse } from "./classify.ts";
+import { ApiError, NoSessionError, SainsburysError } from "../errors.ts";
+import type { Transport } from "./transport.ts";
 import type {
   Basket,
   Product,
@@ -14,7 +10,7 @@ import type {
   Session,
 } from "../types.ts";
 
-export { ApiError, NoSessionError } from "./transport.ts";
+export { ApiError, NoSessionError } from "../errors.ts";
 export type { Transport } from "./transport.ts";
 
 interface ClientOptions {
@@ -69,8 +65,13 @@ export class GroceriesClient {
       headers: opts.headers,
     });
 
-    if (res.status >= 400 || /<HTML>/i.test(res.text.slice(0, 100))) {
-      throw new ApiError(res.status, u.toString(), res.status >= 400 ? "error" : "blocked", res.text.slice(0, 2000));
+    const classified = classifyResponse(res.status, u.toString(), res.text);
+    if (classified) throw classified;
+    if (res.status >= 300 && res.status < 400) {
+      throw new SainsburysError(
+        "session_expired",
+        `HTTP ${res.status} from ${u.pathname}. A redirect here means the groceries session is not signed in.`,
+      );
     }
     if (!res.text) return {} as T;
     try {
@@ -126,25 +127,28 @@ export class GroceriesClient {
     return b ?? {};
   }
 
-  addToBasket(productUid: string, quantity: number, uom = "ea", slotBooked = false): Promise<Basket> {
-    return this.request<Basket>("POST", `/basket/v2/basket/item?${this.basketParams(slotBooked)}`, {
+  async addToBasket(productUid: string, quantity: number, uom = "ea", slotBooked = false): Promise<Basket> {
+    const basket = await this.request<Basket>("POST", `/basket/v2/basket/item?${this.basketParams(slotBooked)}`, {
       body: { product_uid: productUid, quantity, uom, selected_catchweight: "" },
     });
+    return assertBasketMutation(basket);
   }
 
-  updateBasketItem(itemUid: string, quantity: number, slotBooked = false): Promise<Basket> {
-    return this.request<Basket>(
+  async updateBasketItem(itemUid: string, quantity: number, slotBooked = false): Promise<Basket> {
+    const basket = await this.request<Basket>(
       "PUT",
       `/basket/v2/basket/items/${itemUid}?${this.basketParams(slotBooked)}`,
       { body: { quantity } },
     );
+    return assertBasketMutation(basket);
   }
 
-  removeBasketItem(itemUid: string, slotBooked = false): Promise<Basket> {
-    return this.request<Basket>(
+  async removeBasketItem(itemUid: string, slotBooked = false): Promise<Basket> {
+    const basket = await this.request<Basket>(
       "DELETE",
       `/basket/v2/basket/item/${itemUid}?${this.basketParams(slotBooked)}`,
     );
+    return assertBasketMutation(basket);
   }
 
   // ---- slots ------------------------------------------------------------------
@@ -184,9 +188,9 @@ export class GroceriesClient {
   // ---- orders -----------------------------------------------------------------
 
   /**
-   * Order listing. REQUIRES a Bearer/wcauthtoken header pair minted by the
-   * logged-in SPA (see browser/orders-capture.ts) — cookie-only auth yields
-   * an empty list. Pass captured headers when available.
+   * Order listing. The transport sends the session cookie, wcauthtoken, and
+   * bearer token when they exist. Whether that is enough without a browser
+   * has not been checked on a live authenticated session.
    */
   async getOrders(
     pageSize = 10,
@@ -207,4 +211,20 @@ export class GroceriesClient {
   getOrderDetail(uid: string, headers?: Record<string, string>): Promise<Record<string, unknown>> {
     return this.request("GET", `/order/v1/order/${uid}`, { headers });
   }
+}
+
+function assertBasketMutation(data: Basket): Basket {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new SainsburysError(
+      "site_changed",
+      "Basket mutation returned an unexpected shape. No further basket change was attempted.",
+    );
+  }
+  if (!Array.isArray(data.items) && data.basket_id == null && data.order_id == null) {
+    throw new SainsburysError(
+      "site_changed",
+      "Basket mutation response had neither items nor basket_id nor order_id. No further basket change was attempted.",
+    );
+  }
+  return data;
 }

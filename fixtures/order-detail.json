@@ -1,0 +1,15 @@
+{
+  "order_uid": "order-fixture-1",
+  "status": "delivered",
+  "slot_start_time": "2026-10-01T08:00:00Z",
+  "slot_end_time": "2026-10-01T10:00:00Z",
+  "total": 12.4,
+  "order_items": [
+    {
+      "quantity": 1,
+      "uom": "ea",
+      "sub_total": 1.5,
+      "product": { "name": "Fixture oat drink 1L", "product_uid": "12345678" }
+    }
+  ]
+}

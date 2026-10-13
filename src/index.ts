@@ -1,172 +1,129 @@
 #!/usr/bin/env bun
+import fs from "node:fs";
 import { Command } from "commander";
-import { GroceriesClient } from "./api/client.ts";
-import { FetchTransport, PageTransport } from "./api/transport.ts";
-import { KoonTransport } from "./api/koon.ts";
-import { defaultSessionPath } from "./config.ts";
 import {
-  parseCookieHeader,
-  resolveSession,
-  saveSession,
-  deleteSession,
-  findWcauthtoken,
-} from "./session/store.ts";
-import { connectBrowser } from "./browser/connect.ts";
-import {
-  exportSessionFromContext,
-  findChromiumExecutable,
-  importSessionToContext,
-  openWarmedGroceriesPage,
-} from "./browser/context.ts";
-import { interactiveLogin, credentialLogin } from "./browser/login.ts";
-import { bookSlotViaBrowser, listSlotsViaBrowser } from "./browser/slots.ts";
-import { findInOrders, getLatestOrder, getOrderDetailFull, getOrders } from "./services/orders.ts";
-import { smartAdd } from "./services/basket.ts";
-import { doctorApi, doctorLightpanda } from "./services/doctor.ts";
-import { fmtPrice, printTable, priceOf, truncate } from "./util/format.ts";
+  basketAdd,
+  basketRemove,
+  basketView,
+  checkoutConfirm,
+  checkoutPreview,
+  createApp,
+  doctorAkamai,
+  doctorApi,
+  forgetSession,
+  login,
+  ordersFind,
+  ordersView,
+  refresh,
+  search,
+  slotsBook,
+  slotsCancel,
+  slotsView,
+  submitOtp,
+  whoami,
+  type App,
+} from "./app/runtime.ts";
+import { TraceWriter, tracePath } from "./api/trace.ts";
+import { chainOtp, otpFromCode, otpFromFile, otpFromStdin, type OtpSource } from "./auth/otp.ts";
+import { defaultSessionPath, statePaths } from "./config.ts";
+import { exitCodeFor, SainsburysError } from "./errors.ts";
+import { serveMcpStdio, startMcpHttp } from "./mcp/server.ts";
+import { clearAccountFlag, readAccountFlag } from "./session/flag.ts";
+import { loadSecretsFromEnv, Redactor } from "./session/redact.ts";
+import { findWcauthtoken, parseCookieHeader, saveSession } from "./session/store.ts";
+import { fmtPrice, priceOf, printTable, truncate } from "./util/format.ts";
+import type { Basket, Product } from "./types.ts";
 
 const program = new Command();
+const version = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 
 program
   .name("sainsburys")
-  .description("Sainsbury's Groceries automation: orders, slots, basket/amendments")
-  .version("0.1.0")
+  .description("Headless Sainsbury's groceries access. TLS-impersonated HTTP only; no browser.")
+  .version(version)
   .option("--json", "machine-readable output", false)
-  .option("-v, --verbose", "verbose logging to stderr", false)
-  .option("--ws <url>", "remote CDP WebSocket endpoint (remote Playwright / LightPanda)")
-  .option("--cdp-only", "require CDP browser transport; never load or use koonjs", false)
-  .option("--headed", "show the local browser window", false)
-  .option("--browser", "force local Chromium page transport instead of impers sidecar", false)
-  .option("--http", "use raw fetch (denied by Akamai TLS fingerprinting on most networks)", false)
+  .option("-v, --verbose", "write a sanitised trace file", false)
+  .option("--debug", "write a sanitised trace file and print its path", false)
+  .option("--trace <path>", "sanitised trace file path")
   .option("--session <path>", "session file path", defaultSessionPath());
 
-interface OpenedClient {
-  client: GroceriesClient;
-  close?: () => Promise<void>;
-}
-
-/** Build a working client. Priority: CDP > local browser > koon > raw fetch. */
-async function openClient(): Promise<OpenedClient> {
-  const opts = program.opts();
-  const session = resolveSession(opts.session);
-  const cdpOnly = opts.cdpOnly || process.env.SAINSBURYS_CDP_ONLY === "1";
-
-  if (cdpOnly && opts.http) {
-    throw new Error("--cdp-only cannot be combined with --http");
+function appFor(otp?: OtpSource, allowSignIn = true): App {
+  const opts = program.opts<{ verbose?: boolean; debug?: boolean; trace?: string; session: string; json?: boolean }>();
+  const redactor = new Redactor();
+  loadSecretsFromEnv(redactor);
+  const paths = statePaths(opts.session);
+  let trace: TraceWriter | undefined;
+  if (opts.trace || opts.debug || opts.verbose) {
+    trace = new TraceWriter(opts.trace || tracePath(paths.traceDir), redactor);
+    console.error(`trace: ${trace.file}`);
   }
-
-  if (opts.http) {
-    return { client: new GroceriesClient({ session, transport: new FetchTransport(session) }) };
-  }
-
-  if (wsEndpoint(opts)) {
-    const bs = await connectBrowser({ ws: wsEndpoint(opts), verbose: opts.verbose });
-    if (session) await importSessionToContext(bs.context, session);
-    const page = await openWarmedGroceriesPage(bs.context);
-    return {
-      client: new GroceriesClient({ session, transport: new PageTransport(page) }),
-      close: () => bs.close(),
-    };
-  }
-
-  if (cdpOnly) {
-    throw new Error(
-      "CDP-only mode requires --ws <url> or SAINSBURYS_WS (for example ws://127.0.0.1:9222). Start Chromium/LightPanda with CDP enabled.",
-    );
-  }
-
-  // Default: koonjs impersonated-TLS transport (works under Node AND Bun).
-  const koon = new KoonTransport(session);
-  return { client: new GroceriesClient({ session, transport: koon }), close: () => koon.close() };
-}
-
-
-/** Resolve remote CDP endpoint: --ws flag wins, then SAINSBURYS_WS env. */
-function wsEndpoint(opts: { ws?: string }): string | undefined {
-  return opts.ws ?? (process.env.SAINSBURYS_WS || undefined);
+  return createApp({
+    sessionPath: opts.session,
+    redactor,
+    trace,
+    allowSignIn,
+    otp,
+  });
 }
 
 function fail(err: unknown): never {
-  const msg = err instanceof Error ? err.message : String(err);
-  console.error(`error: ${msg}`);
-  process.exit(1);
+  if (err instanceof SainsburysError) console.error(`error: [${err.code}] ${err.message}`);
+  else console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(exitCodeFor(err));
 }
 
-async function withClient<T>(fn: (c: GroceriesClient) => Promise<T>): Promise<void> {
-  let opened: OpenedClient | undefined;
-  try {
-    opened = await openClient();
-    await fn(opened.client);
-  } catch (err) {
-    fail(err);
-  } finally {
-    await opened?.close?.();
-  }
+function emit(value: unknown): void {
+  if (program.opts().json) console.log(JSON.stringify(value, null, 2));
 }
-
-// ---- auth -----------------------------------------------------------------
 
 program
   .command("login")
-  .description("authenticate: with SAINSBURYS_USERNAME+SAINSBURYS_PASSWORD set, fills the form headlessly (add --mfa <code> if prompted); otherwise opens an interactive browser window")
-  .option("--mfa <code>", "one-time code for the MFA challenge step")
-  .option("--mfa-file <path>", "wait for an MFA code to be written to this file (agent-friendly)")
-  .action(async (cmdOpts: { mfa?: string; mfaFile?: string }) => {
-    const opts = program.opts();
-    const cdpOnly = opts.cdpOnly || process.env.SAINSBURYS_CDP_ONLY === "1";
-    if (cdpOnly && !wsEndpoint(opts)) {
-      throw new Error(
-        "CDP-only mode requires --ws <url> or SAINSBURYS_WS for login too. Start Chromium/LightPanda with CDP enabled.",
-      );
-    }
-    const username = process.env.SAINSBURYS_USERNAME;
-    const password = process.env.SAINSBURYS_PASSWORD;
+  .description("HTTP sign-in. Reuses a valid session, refreshes before a new sign-in, then posts credentials. OTP via --mfa, --mfa-file, or a TTY prompt.")
+  .option("--mfa <code>", "one-time code for the MFA step already reached")
+  .option("--mfa-file <path>", "read the one-time code from this file (same login, no second password post)")
+  .action(async (cmd: { mfa?: string; mfaFile?: string }) => {
+    const otp = cmd.mfa
+      ? otpFromCode(cmd.mfa)
+      : cmd.mfaFile
+        ? otpFromFile(cmd.mfaFile, 5 * 60_000)
+        : chainOtp(otpFromStdin(5 * 60_000));
     try {
-      if (username && password) {
-        console.error(
-          `Credential login for ${username}${wsEndpoint(opts) ? ` via remote browser ${wsEndpoint(opts)}` : " (headless local browser)"}...`,
-        );
-        const { sessionPath } = await credentialLogin({
-          username,
-          password,
-          mfaCode: cmdOpts.mfa,
-          mfaFile: cmdOpts.mfaFile,
-          ws: wsEndpoint(opts),
-          headed: opts.headed,
-          verbose: opts.verbose,
-          sessionPath: opts.session,
-          executablePath: findChromiumExecutable(),
-        });
-        console.log(`Session saved to ${sessionPath}`);
-      } else {
-        const { sessionPath } = await interactiveLogin({
-          ws: wsEndpoint(opts),
-          headed: opts.headed || !wsEndpoint(opts),
-          verbose: opts.verbose,
-          sessionPath: opts.session,
-          executablePath: findChromiumExecutable(),
-        });
-        console.log(`Session saved to ${sessionPath}`);
-      }
+      const result = await login(appFor(otp, true));
+      if (program.opts().json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`sign-in: ${result.action}\nSession saved to ${program.opts().session}`);
     } catch (err) {
+      if (err instanceof SainsburysError && err.code === "needs_human" && cmd.mfa) {
+        try {
+          const result = await submitOtp(appFor(otpFromCode(cmd.mfa), true), cmd.mfa);
+          if (program.opts().json) console.log(JSON.stringify(result, null, 2));
+          else console.log(`sign-in: ${result.action}\nSession saved to ${program.opts().session}`);
+          return;
+        } catch (next) {
+          fail(next);
+        }
+      }
       fail(err);
     }
   });
 
 program
   .command("import-cookie-header")
-  .description("import cookies pasted from devtools (Network -> groceries-api request -> Cookie header)")
+  .description("import cookies pasted from devtools")
   .argument("<cookieHeader>")
   .option("-t, --wcauthtoken <token>", "wcauthtoken request header value")
-  .action((header: string, cmdOpts: { wcauthtoken?: string }) => {
+  .action((header: string, cmd: { wcauthtoken?: string }) => {
     try {
       const cookies = parseCookieHeader(header);
       if (!cookies.length) throw new Error("No cookies parsed from input");
-      const session = saveSession({
-        cookies,
-        wcauthtoken: cmdOpts.wcauthtoken ?? findWcauthtoken(cookies),
-        source: "cookie-import",
-      });
+      const session = saveSession(
+        {
+          cookies,
+          wcauthtoken: cmd.wcauthtoken ?? findWcauthtoken(cookies),
+          source: "cookie-import",
+          established: true,
+        },
+        program.opts().session,
+      );
       console.log(`Imported ${cookies.length} cookies -> ${session}`);
     } catch (err) {
       fail(err);
@@ -177,396 +134,296 @@ program
   .command("logout")
   .description("delete the saved session")
   .action(() => {
-    console.log(deleteSession(program.opts().session) ? "Session deleted" : "No saved session");
+    console.log(forgetSession(program.opts().session) ? "Session deleted" : "No saved session");
   });
 
-// ---- account ----------------------------------------------------------------
-
 program
-  .command("whoami")
-  .description("verify session; show profile summary")
-  .action(async () =>
-    withClient(async (client) => {
-      const profile = await client.getProfile();
-      if (program.opts().json) return console.log(JSON.stringify(profile, null, 2));
-      printTable(
-        Object.entries(profile)
-          .filter(([, v]) => typeof v !== "object")
-          .map(([k, v]) => ({ field: k, value: String(v).slice(0, 80) })),
-        ["field", "value"],
-      );
-    }),
-  );
+  .command("refresh")
+  .description("try refresh_token, then the silent oauth refresh. Does not sign in.")
+  .action(async () => {
+    try {
+      const result = await refresh(appFor(undefined, false));
+      if (program.opts().json) console.log(JSON.stringify(result, null, 2));
+      else console.log(result.refreshed ? "refresh: extended" : "refresh: not extended");
+    } catch (err) {
+      fail(err);
+    }
+  });
 
-// ---- search -------------------------------------------------------------------
+program.command("whoami").description("verify session; show profile summary").action(async () => {
+  try {
+    const profile = await whoami(appFor());
+    if (program.opts().json) return emit(profile);
+    printTable(
+      Object.entries(profile)
+        .filter(([, value]) => typeof value !== "object")
+        .map(([field, value]) => ({ field, value: String(value).slice(0, 80) })),
+      ["field", "value"],
+    );
+  } catch (err) {
+    fail(err);
+  }
+});
 
 program
   .command("search")
-  .description("search products")
   .argument("<query>")
   .option("-n, --limit <n>", "results", "10")
-  .action(async (query: string, cmdOpts: { limit: string }) =>
-    withClient(async (client) => {
-      const res = await client.searchProducts(query, 1, Math.min(Number(cmdOpts.limit), 60));
-      if (program.opts().json) return console.log(JSON.stringify(res.products ?? res, null, 2));
+  .action(async (query: string, cmd: { limit: string }) => {
+    try {
+      const res = (await search(appFor(undefined, false), query, Math.min(Number(cmd.limit), 60))) as {
+        products?: Product[];
+      };
+      if (program.opts().json) return emit(res.products ?? res);
       printTable(
-        (res.products ?? []).map((p) => ({
-          uid: p.product_uid,
-          name: truncate(p.name, 55),
-          price: fmtPrice(p.retail_price),
-          stock: p.in_stock === false ? "out" : "in",
+        (res.products ?? []).map((product) => ({
+          uid: product.product_uid,
+          name: truncate(product.name, 55),
+          price: fmtPrice(priceOf(product.retail_price) ?? product.retail_price),
+          stock: product.in_stock === false ? "out" : "in",
         })),
         ["uid", "name", "price", "stock"],
       );
-    }),
-  );
-
-// ---- basket ---------------------------------------------------------------------
+    } catch (err) {
+      fail(err);
+    }
+  });
 
 const basket = program.command("basket").description("view / edit the current basket");
-
-basket.command("view").action(async () =>
-  withClient(async (client) => {
-    const b = await client.getBasket();
-    if (program.opts().json) return console.log(JSON.stringify(b, null, 2));
+basket.command("view").action(async () => {
+  try {
+    const current = (await basketView(appFor())) as Basket;
+    if (program.opts().json) return emit(current);
     printTable(
-      (b.items ?? []).map((i) => ({
-        item_uid: i.item_uid,
-        sku: i.product?.sku ?? "?",
-        name: truncate(String(i.product?.name ?? "?"), 50),
-        qty: i.quantity,
-        subtotal: fmtPrice(i.subtotal_price),
+      (current.items ?? []).map((item) => ({
+        item_uid: item.item_uid,
+        sku: item.product?.sku ?? "?",
+        name: truncate(String(item.product?.name ?? "?"), 50),
+        qty: item.quantity,
+        subtotal: fmtPrice(item.subtotal_price),
       })),
       ["item_uid", "sku", "name", "qty", "subtotal"],
     );
-    console.log(
-      `\nitems=${b.item_count ?? (b.items ?? []).length} subtotal=${fmtPrice(b.subtotal_price)} min_spend=${fmtPrice(b.minimum_spend)}`,
-    );
-  }),
-);
-
-async function addToTarget(queryOrSku: string, qty: number): Promise<void> {
-  // With a booked slot, additions amend the upcoming order automatically.
-  await withClient(async (client) => {
-    const result = await smartAdd(client, queryOrSku, qty);
-    if (program.opts().json) return console.log(JSON.stringify(result, null, 2));
-    console.log(`+ ${result.quantity} x ${result.name} (${result.productUid}) -> ${result.target}`);
-  });
-}
-
+  } catch (err) {
+    fail(err);
+  }
+});
 basket
   .command("add")
-  .description("add a product by uid or search query")
   .argument("<productOrQuery>")
   .option("-q, --qty <n>", "quantity", "1")
-  .action(async (p: string, o: { qty: string }) => {
+  .action(async (product: string, cmd: { qty: string }) => {
     try {
-      await addToTarget(p, Number(o.qty));
+      const result = await basketAdd(appFor(), product, Number(cmd.qty));
+      if (program.opts().json) return emit(result);
+      const row = result as { quantity: number; name: string; productUid: string; target: string };
+      console.log(`+ ${row.quantity} x ${row.name} (${row.productUid}) -> ${row.target}`);
     } catch (err) {
       fail(err);
     }
   });
-
 basket
   .command("remove")
-  .description("remove a basket item by item_uid")
   .argument("<itemUid>")
-  .action(async (itemUid: string) =>
-    withClient(async (client) => {
-      const b = await client.removeBasketItem(itemUid);
-      if (program.opts().json) return console.log(JSON.stringify(b, null, 2));
-      console.log(`removed ${itemUid}; items=${(b.items ?? []).length}`);
-    }),
-  );
-
-// ---- orders -----------------------------------------------------------------------
-
-const orders = program.command("orders").description("previous & upcoming orders");
-
-function ordersCtx() {
-  const opts = program.opts();
-  return {
-    session: resolveSession(opts.session),
-    browser: {
-      ws: wsEndpoint(opts),
-      headed: opts.headed,
-      verbose: opts.verbose,
-      executablePath: findChromiumExecutable(),
-      sessionPath: opts.session,
-    },
-  };
-}
-
-orders
-  .command("list")
-  .alias("history")
-  .option("-n, --limit <n>", "max orders shown", "10")
-  .action(async (o: { limit: string }) => {
-    const oc = await openClient();
+  .action(async (itemUid: string) => {
     try {
-      const limit = Number(o.limit);
-      const pageSize = Math.min(limit || 10, 10);
-      const pages = Math.ceil(limit / pageSize) || 1;
-      let all: Awaited<ReturnType<typeof getOrders>>["orders"] = [];
-      let via = "";
-      for (let p = 1; p <= pages; p++) {
-        const r = await getOrders(oc.client, ordersCtx(), { pageNumber: p, pageSize });
-        via = r.via;
-        all = all.concat(r.orders);
-        if (r.orders.length < pageSize) break;
-      }
-      const rows = all.slice(0, limit);
-      if (program.opts().json) return console.log(JSON.stringify({ via, orders: rows }, null, 2));
-      console.error(`via: ${via}`);
-      printTable(
-        rows.map((r2) => ({ ...r2, raw: undefined })),
-        ["id", "status", "delivery_date", "total", "amendable"],
-      );
+      const current = (await basketRemove(appFor(), itemUid)) as Basket;
+      if (program.opts().json) return emit(current);
+      console.log(`removed ${itemUid}; items=${(current.items ?? []).length}`);
     } catch (err) {
       fail(err);
-    } finally {
-      await oc.close?.();
     }
   });
 
+const orders = program.command("orders").description("previous orders over HTTP");
+orders
+  .command("list")
+  .option("-n, --limit <n>", "max orders shown", "10")
+  .action(async (cmd: { limit: string }) => {
+    try {
+      const result = (await ordersView(appFor())) as { orders: { id: string; status?: string; delivery_date?: string; total?: number; amendable?: boolean }[] };
+      const rows = result.orders.slice(0, Number(cmd.limit));
+      if (program.opts().json) return emit({ via: "http", orders: rows });
+      printTable(rows, ["id", "status", "delivery_date", "total", "amendable"]);
+    } catch (err) {
+      fail(err);
+    }
+  });
 orders
   .command("find")
-  .description('search line items across previous orders, e.g. orders find "mushy peas" --pages 3')
   .argument("<query>")
-  .option("-p, --pages <n>", "how many history pages to scan (10 orders/page)", "3")
-  .action(async (query: string, o: { pages: string }) => {
-    const oc = await openClient();
+  .option("-p, --pages <n>", "history pages", "3")
+  .action(async (query: string, cmd: { pages: string }) => {
     try {
-      const res = await findInOrders(oc.client, ordersCtx(), query, {
-        maxPages: Number(o.pages),
-      });
-      if (program.opts().json) return console.log(JSON.stringify(res, null, 2));
-      console.error(`scanned ${res.scanned} orders (via ${res.via})`);
-      if (!res.matches.length) return console.log(`no matches for "${query}"`);
-      for (const m of res.matches) {
-        console.log(
-          `\n${m.order.id}  ${m.order.delivery_date?.slice(0, 10) ?? "?"}  total ${fmtPrice(m.order.total)}:`,
-        );
-        for (const it of m.items)
-          console.log(
-            `   • ${it.quantity}${it.uom ?? ""} ${truncate(it.name, 60)} (${it.uid}) ${fmtPrice(it.sub_total)}`,
-          );
-      }
+      const result = await ordersFind(appFor(), query, Number(cmd.pages));
+      if (program.opts().json) return emit(result);
+      console.log(JSON.stringify(result, null, 2));
     } catch (err) {
       fail(err);
-    } finally {
-      await oc.close?.();
     }
   });
-
 orders
   .command("view")
-  .alias("show")
-  .description("full detail of one order: every line item, payment, address, slot")
   .argument("<orderIdOrLatest>")
-  .action(async (orderIdOrLatest: string) => {
+  .action(async (orderId: string) => {
     try {
-      const oc = await openClient();
-      try {
-        let uid = orderIdOrLatest;
-        if (uid === "latest") uid = (await getLatestOrder(oc.client, ordersCtx())).id;
-        const { summary, detail } = await getOrderDetailFull(oc.client, ordersCtx(), uid);
-        if (program.opts().json) return console.log(JSON.stringify(detail, null, 2));
-
-        const addr = (detail.delivery_address ?? {}) as Record<string, unknown>;
-        const slot =
-          summary.delivery_date && detail.slot_end_time
-            ? `${String(summary.delivery_date).slice(0, 16).replace("T", " ")} → ${String(detail.slot_end_time).slice(11, 16)}`
-            : "—";
-        console.log(
-          `Order ${summary.id}  [${summary.status}]  slot: ${slot}  total ${fmtPrice(summary.total)}`,
-        );
-        if (addr.nickname || addr.postcode)
-          console.log(
-            `Address: ${addr.nickname ?? ""} ${[addr.street, addr.town, addr.postcode].filter(Boolean).join(", ")}`,
-          );
-        if (detail.receipt_url)
-          console.log(`Receipt: ${String(detail.receipt_url).split("?")[0]}  (signed URL, ~1h validity)`);
-
-        const items = (Array.isArray((detail as any).order_items) ? (detail as any).order_items : []) as any[];
-        printTable(
-          items.map((it) => ({
-            qty: String(it.quantity),
-            name: truncate(String(it.product?.name ?? "?"), 55),
-            uid: it.product?.product_uid ?? "?",
-            price: fmtPrice(it.sub_total),
-          })),
-          ["qty", "name", "uid", "price"],
-        );
-
-        const money = [
-          ["Subtotal", detail.sub_total],
-          ["Slot/delivery", detail.slot_price],
-          ["Carrier bags", detail.carrier_bag_charge],
-          ["Savings", detail.savings],
-        ] as const;
-        const parts = money
-          .filter(([, v]) => v !== undefined && v !== null && Number.isFinite(Number(v)))
-          .map(([k, v]) => `${k} ${fmtPrice(Number(v))}`);
-        console.log(`\n${parts.join("  ·  ")}  →  Total ${fmtPrice(summary.total)}`);
-      } finally {
-        await oc.close?.();
-      }
+      const result = await ordersView(appFor(), orderId);
+      console.log(JSON.stringify(result, null, 2));
     } catch (err) {
       fail(err);
     }
   });
+orders.command("latest").action(async () => {
+  try {
+    const result = await ordersView(appFor(), "latest");
+    console.log(JSON.stringify(result, null, 2));
+  } catch (err) {
+    fail(err);
+  }
+});
 
-orders
-  .command("latest")
-  .description("most recent / next order")
-  .action(async () => {
-    const oc = await openClient();
-    try {
-      const latest = await getLatestOrder(oc.client, ordersCtx());
-      if (program.opts().json) return console.log(JSON.stringify(latest, null, 2));
-      printTable([{ ...latest, raw: undefined }], ["id", "status", "delivery_date", "total", "amendable"]);
-    } catch (err) {
-      fail(err);
-    } finally {
-      await oc.close?.();
-    }
-  });
-
-const amend = program.command("amend").description("amend an existing/upcoming order");
-
+const amend = program.command("amend").description("amend the upcoming order by adding a line");
 amend
   .command("add")
-  .description("add items to the upcoming order (uses booked-slot semantics)")
   .argument("<productOrQuery>")
   .option("-q, --qty <n>", "quantity", "1")
-  .action(async (p: string, o: { qty: string }) => {
+  .action(async (product: string, cmd: { qty: string }) => {
     try {
-      await addToTarget(p, Number(o.qty));
+      const result = await basketAdd(appFor(), product, Number(cmd.qty));
+      if (program.opts().json) emit(result);
+      else console.log(JSON.stringify(result));
     } catch (err) {
       fail(err);
     }
   });
 
-// ---- slots -------------------------------------------------------------------------
-
-const slots = program.command("slots").description("delivery slots");
-
-slots
-  .command("list")
-  .description("list available delivery slots (API first, UI fallback)")
-  .option("-p, --postcode <pc>", "postcode for unauthenticated search")
-  .action(async (o: { postcode?: string }) =>
-    withClient(async (client) => {
-      const opts = program.opts();
-      let rows: Record<string, unknown>[];
-      let via = "ui";
-      try {
-        const direct = await client.listSlotsDirect({});
-        const arr = Array.isArray(direct) ? direct : ((direct as any)?.slots ?? []);
-        rows = (arr as any[]).map((s, i) => ({
-          id: String(s.id ?? s.slot_id ?? i),
-          date: s.date ?? s.start_date,
-          start: s.start_time ?? s.start,
-          end: s.end_time ?? s.end,
-          price: fmtPrice(s.price ?? s.slot_price),
-        }));
-        via = "api";
-      } catch (err) {
-        if (!wsEndpoint(opts) && !opts.headed) throw err;
-        const domSlots = await listSlotsViaBrowser({
-          ws: wsEndpoint(opts),
-          headed: opts.headed,
-          postcode: o.postcode,
-        });
-        rows = domSlots.map((s) => ({
-          id: s.id,
-          date: s.date,
-          start: s.start,
-          end: s.end,
-          price: fmtPrice(s.price),
-        }));
-      }
-      if (opts.json) return console.log(JSON.stringify({ via, slots: rows }, null, 2));
-      console.error(`via: ${via}`);
-      printTable(rows, ["id", "date", "start", "end", "price"]);
-    }),
-  );
-
+const slots = program.command("slots").description("delivery slots over HTTP");
+slots.command("reservation").action(async () => {
+  try {
+    const result = (await slotsView(appFor())) as { reservation: unknown };
+    console.log(JSON.stringify(result.reservation, null, 2));
+  } catch (err) {
+    fail(err);
+  }
+});
+slots.command("list").action(async () => {
+  try {
+    const result = await slotsView(appFor());
+    if (program.opts().json) return emit(result);
+    console.log(JSON.stringify(result, null, 2));
+  } catch (err) {
+    fail(err);
+  }
+});
 slots
   .command("book")
-  .description("book a slot by id (API attempt, then UI click fallback). A regex picks a visible slot.")
-  .argument("<slotIdOrPattern>")
-  .option("--dry-run", "do not confirm booking", false)
-  .action(async (slotIdOrPattern: string, o: { dryRun: boolean }) =>
-    withClient(async (client) => {
-      const opts = program.opts();
-      if (/^[\w-]+$/.test(slotIdOrPattern)) {
-        try {
-          const res = await client.bookSlotDirect(slotIdOrPattern);
-          if (opts.json) return console.log(JSON.stringify(res, null, 2));
-          return console.log(`Booked slot ${slotIdOrPattern} (via API)`);
-        } catch (err) {
-          console.error(`direct API failed (${String(err).slice(0, 120)}); trying UI...`);
-        }
-      }
-      if (!wsEndpoint(opts) && !opts.headed) throw new Error("UI booking needs --ws or --headed");
-      const result = await bookSlotViaBrowser({
-        ws: wsEndpoint(opts),
-        headed: opts.headed,
-        match: new RegExp(slotIdOrPattern, "i"),
-        dryRun: o.dryRun,
-      });
-      if (opts.json) return console.log(JSON.stringify(result, null, 2));
-      console.log(
-        `${o.dryRun ? "would click" : "clicked"} slot matching /${slotIdOrPattern}/` +
-          (result.confirmed ? " and confirmed" : ""),
-      );
-    }),
-  );
-
-slots.command("cancel").description("cancel current slot reservation").action(async () =>
-  withClient(async (client) => {
-    const res = await client.cancelReservation();
-    if (program.opts().json) return console.log(JSON.stringify(res, null, 2));
-    console.log("Reservation cancelled");
-  }),
-);
-
-slots.command("reservation").description("show current reservation status").action(async () =>
-  withClient(async (client) => {
-    const r = await client.getReservation();
-    console.log(JSON.stringify(r, null, 2));
-  }),
-);
-
-// ---- doctor ---------------------------------------------------------------------------
-
-const doctor = program.command("doctor").description("diagnostics");
-
-doctor
-  .command("lightpanda")
-  .description("test whether a LightPanda/CDP browser is accepted by sainsburys.co.uk")
-  .option("--ws <url>", "CDP endpoint", "ws://127.0.0.1:9222")
-  .action(async (o: { ws: string }) => {
+  .argument("<slotId>")
+  .action(async (slotId: string) => {
     try {
-      const result = await doctorLightpanda({ ws: o.ws, verbose: program.opts().verbose });
-      if (program.opts().json) return console.log(JSON.stringify(result, null, 2));
-      for (const c of result.checks) console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.name}: ${c.detail}`);
-      console.log(result.ok ? "\nLightPanda appears accepted." : "\nLightPanda NOT fully accepted.");
-      process.exitCode = result.ok ? 0 : 1;
+      const result = await slotsBook(appFor(), slotId);
+      if (program.opts().json) emit(result);
+      else console.log(`Booked slot ${slotId} (via API)`);
+    } catch (err) {
+      fail(err);
+    }
+  });
+slots.command("cancel").action(async () => {
+  try {
+    await slotsCancel(appFor());
+    console.log("Reservation cancelled");
+  } catch (err) {
+    fail(err);
+  }
+});
+
+const checkout = program.command("checkout").description("two-step checkout. confirm never runs unless the preview token still matches");
+checkout.command("preview").description("show basket, slot and total and print a confirm token").action(async () => {
+  try {
+    const result = await checkoutPreview(appFor());
+    if (program.opts().json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(JSON.stringify(result.preview, null, 2));
+      console.log(`\npreview token: ${result.token}`);
+      console.log("Nothing was purchased. confirm only after the account owner says yes.");
+    }
+  } catch (err) {
+    fail(err);
+  }
+});
+checkout
+  .command("confirm")
+  .description("continue only when --token matches an unchanged preview")
+  .requiredOption("--token <hash>", "token printed by checkout preview")
+  .action(async (cmd: { token: string }) => {
+    try {
+      const result = await checkoutConfirm(appFor(), cmd.token);
+      console.log(JSON.stringify(result, null, 2));
     } catch (err) {
       fail(err);
     }
   });
 
-doctor.command("api").description("check session health against authenticated endpoints").action(async () =>
-  withClient(async (client) => {
-    const result = await doctorApi(client);
-    if (program.opts().json) return console.log(JSON.stringify(result, null, 2));
-    for (const c of result.checks) console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.name}: ${c.detail}`);
+const flag = program.command("account-flag").description("sticky stop after Sainsbury's flags the account");
+flag.command("status").action(() => {
+  const current = readAccountFlag(statePaths(program.opts().session).flagPath);
+  if (!current) console.log("not flagged");
+  else console.log(JSON.stringify(current, null, 2));
+});
+flag
+  .command("clear")
+  .requiredOption("--acknowledge", "confirm a person reviewed the account")
+  .action(() => {
+    const removed = clearAccountFlag(statePaths(program.opts().session).flagPath);
+    console.log(removed ? "flag cleared" : "not flagged");
+  });
+
+const doctor = program.command("doctor").description("diagnostics");
+doctor.command("api").action(async () => {
+  try {
+    const result = await doctorApi(appFor(undefined, false));
+    if (program.opts().json) console.log(JSON.stringify(result, null, 2));
+    else for (const check of result.checks) console.log(`${check.ok ? "PASS" : "FAIL"}  ${check.name}: ${check.detail}`);
     process.exitCode = result.ok ? 0 : 1;
-  }),
-);
+  } catch (err) {
+    fail(err);
+  }
+});
+doctor
+  .command("akamai")
+  .description("compare plain fetch (expect blocked) with TLS impersonation (guest JSON is unauthenticated, not blocked)")
+  .action(async () => {
+    try {
+      const result = await doctorAkamai(appFor(undefined, false));
+      if (program.opts().json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`plain-fetch: ${result.plain}`);
+        console.log(`impersonated: ${result.impersonated}`);
+      }
+      process.exitCode = result.impersonated.startsWith("akamai_blocked") ? 13 : 0;
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+program
+  .command("mcp")
+  .description("MCP server. stdio by default; --http binds a local JSON-RPC endpoint")
+  .option("--http", "serve HTTP instead of stdio", false)
+  .option("--port <n>", "HTTP port", "8787")
+  .option("--host <addr>", "HTTP host", "127.0.0.1")
+  .action(async (cmd: { http?: boolean; port: string; host: string }) => {
+    const app = appFor(undefined, true);
+    try {
+      if (cmd.http) {
+        const server = await startMcpHttp(app, Number(cmd.port), cmd.host);
+        console.error(`mcp listening on http://${cmd.host}:${server.port}/`);
+        await new Promise(() => {});
+      } else {
+        await serveMcpStdio(app);
+      }
+    } catch (err) {
+      fail(err);
+    }
+  });
 
 program.parseAsync(process.argv);

@@ -1,0 +1,8 @@
+{
+  "reservation_type": "delivery",
+  "postcode": "SW1A 1AA",
+  "slot": {
+    "slot_id": "slot-fixture-1",
+    "slot_info": { "start": "2026-10-14T08:00:00Z", "end": "2026-10-14T10:00:00Z" }
+  }
+}

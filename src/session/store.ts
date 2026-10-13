@@ -2,19 +2,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { defaultSessionPath } from "../config.ts";
 import type { Session, SessionCookie } from "../types.ts";
+import { findWcauthtoken, parseCookieHeader, buildCookieHeader } from "./cookies.ts";
 
-const AUTH_COOKIE_PREFIX = "WC_AUTHENTICATION_";
-
-export function findWcauthtoken(cookies: SessionCookie[]): string {
-  const auth = cookies.find((c) => c.name.startsWith(AUTH_COOKIE_PREFIX));
-  return auth?.value ?? "";
-}
+export { findWcauthtoken, parseCookieHeader, buildCookieHeader, cookieHeaderForUrl, applySetCookies } from "./cookies.ts";
 
 export function loadSession(sessionPath = defaultSessionPath()): Session | null {
   try {
     const raw = fs.readFileSync(sessionPath, "utf8");
     const parsed = JSON.parse(raw) as Session;
-    if (!parsed.cookies?.length) return null;
+    if (!parsed.cookies?.length && !parsed.accessToken && !parsed.refreshToken) return null;
+    if (!parsed.cookies) parsed.cookies = [];
     if (!parsed.wcauthtoken) parsed.wcauthtoken = findWcauthtoken(parsed.cookies);
     return parsed;
   } catch {
@@ -22,14 +19,24 @@ export function loadSession(sessionPath = defaultSessionPath()): Session | null 
   }
 }
 
-export function saveSession(
-  session: Session,
-  sessionPath = defaultSessionPath(),
-): string {
+export function saveSession(session: Session, sessionPath = defaultSessionPath()): string {
   if (!session.wcauthtoken) session.wcauthtoken = findWcauthtoken(session.cookies);
-  fs.mkdirSync(path.dirname(sessionPath), { recursive: true });
-  fs.writeFileSync(sessionPath, JSON.stringify(session, null, 2), { mode: 0o600 });
+  const persisted = sessionForDisk(session);
+  fs.mkdirSync(path.dirname(sessionPath), { recursive: true, mode: 0o700 });
+  const tmp = `${sessionPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(persisted, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, sessionPath);
+  fs.chmodSync(sessionPath, 0o600);
   return sessionPath;
+}
+
+/** Passwords and emails are never part of the session type; this drops them if a caller stuffed them on. */
+function sessionForDisk(session: Session): Session {
+  const copy = { ...session, cookies: session.cookies.map((cookie) => ({ ...cookie })) };
+  const extra = copy as Session & { password?: unknown; email?: unknown };
+  delete extra.password;
+  delete extra.email;
+  return copy;
 }
 
 export function deleteSession(sessionPath = defaultSessionPath()): boolean {
@@ -41,42 +48,22 @@ export function deleteSession(sessionPath = defaultSessionPath()): boolean {
   }
 }
 
-/**
- * Parse a raw Cookie request header (as copied from devtools)
- * into session cookies scoped to .sainsburys.co.uk.
- */
-export function parseCookieHeader(header: string): SessionCookie[] {
-  const out: SessionCookie[] = [];
-  for (const part of header.split(/;\s*/)) {
-    const idx = part.indexOf("=");
-    if (idx <= 0) continue;
-    const name = part.slice(0, idx).trim();
-    const value = part.slice(idx + 1).trim();
-    if (!name || !value) continue;
-    out.push({
-      name,
-      value,
-      domain: ".sainsburys.co.uk",
-      path: "/",
-      secure: true,
-      httpOnly: name.startsWith("WC_") || name === "JSESSIONID",
-    });
-  }
-  return out;
-}
-
-export function buildCookieHeader(cookies: SessionCookie[]): string {
-  return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+export function buildCookieHeaderFromSession(cookies: SessionCookie[]): string {
+  return buildCookieHeader(cookies);
 }
 
 /** Build a session from env vars (SAINSBURYS_COOKIE / SAINSBURYS_WCAUTHTOKEN). */
 export function sessionFromEnv(): Session | null {
   const cookieHeader = process.env.SAINSBURYS_COOKIE;
-  if (!cookieHeader) return null;
-  const cookies = parseCookieHeader(cookieHeader);
+  const accessToken = process.env.SAINSBURYS_ACCESS_TOKEN;
+  const refreshToken = process.env.SAINSBURYS_REFRESH_TOKEN;
+  if (!cookieHeader && !accessToken && !refreshToken) return null;
+  const cookies = cookieHeader ? parseCookieHeader(cookieHeader) : [];
   return {
     cookies,
     wcauthtoken: process.env.SAINSBURYS_WCAUTHTOKEN ?? findWcauthtoken(cookies),
+    accessToken: accessToken || undefined,
+    refreshToken: refreshToken || undefined,
     source: "env",
   };
 }

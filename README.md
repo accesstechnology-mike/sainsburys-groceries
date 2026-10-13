@@ -3,184 +3,129 @@
 [![skills.sh installs](https://skills.sh/b/mike-grant/sainsburys-groceries)](https://skills.sh/mike-grant/sainsburys-groceries)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Runtime-agnostic (Node & Bun) TypeScript CLI + agent skill for automating
-[Sainsbury's Groceries](https://www.sainsburys.co.uk/gol-ui/): previous orders,
-delivery slot booking, basket management, and amending your upcoming order.
-No browser required after one-time login.
+Headless TypeScript CLI and MCP server for a personal [Sainsbury's Groceries](https://www.sainsburys.co.uk/gol-ui/) account. Every request uses Chrome TLS impersonation. There is no browser in the runtime: not for sign-in, not for checkout, and not as a fallback.
 
-> **Personal-use tool.** Talks to Sainsbury's unofficial internal API with your
-> own account. Nothing here places orders or charges you — checkout is
-> intentionally out of scope.
+> Personal-use tool. It talks to Sainsbury's unofficial groceries API with your own account. `checkout confirm` does not place an order until a sanitised HAR maps the endpoint, and it never sends card data.
 
-## Install the agent skill (one command)
-
-Works with Claude Code, Codex, Cursor, Copilot, Windsurf, Gemini CLI, Cline,
-OpenCode, Goose and more:
+## Setup
 
 ```bash
-npx skills add mike-grant/sainsburys-groceries
+bun install
+bun test          # offline smoke. No network, no credentials.
 ```
 
-Prefer manual? Symlink it yourself:
+Node 20+ can run `node src/index.ts` the same way. The installed binary is `bin/sainsburys.js`, which prefers `dist/` and otherwise loads `src/`.
+
+## Credentials
+
+Read from the environment only, so `op run` can inject them. They are never written to the session file, the MFA resume file, or a trace.
+
+| Variable | Use |
+|---|---|
+| `SAINSBURYS_EMAIL` or `SAINSBURYS_USERNAME` | account email |
+| `SAINSBURYS_PASSWORD` | password |
+| `SAINSBURYS_COOKIE` | optional cookie-header import |
+| `SAINSBURYS_WCAUTHTOKEN` | optional `wcauthtoken` header |
+| `SAINSBURYS_ACCESS_TOKEN` / `SAINSBURYS_REFRESH_TOKEN` | optional tokens |
 
 ```bash
-git clone https://github.com/mike-grant/sainsburys-groceries
-./sainsburys-groceries/scripts/install-skill.sh   # links into ~/.claude/skills, ~/.agents/skills
+op run -- bun src/index.ts login --debug
 ```
 
-Then just ask your agent: *"what did I order from Sainsbury's last week?"* or
-*"add oat milk and eggs to my Sainsbury's basket"* — the SKILL.md teaches it the
-exact commands and safety semantics.
+## Sign-in
 
-## Install the CLI
+Login is Ory Hydra at `account.sainsburys.co.uk` (`client_id=gol`, PKCE S256, scope `openid offline gol-session`). A correct password on a new client returns 303 to `/gol/login/mfa`. The one-time code is supplied in the same login, or later, without posting the password again.
 
 ```bash
-npm i -g sainsburys-groceries-cli     # Node >= 20
-# or zero-install per command:
-npx -y sainsburys-groceries-cli search "oat milk"
-# or run straight from a clone:
-bun src/index.ts --help               # Bun >= 1.1
-node src/index.ts --help              # same file, same features
+# TTY: prompts once if MFA appears
+SAINSBURYS_EMAIL=you@example.com SAINSBURYS_PASSWORD='...' bun src/index.ts login
+
+# Same process, code already known
+bun src/index.ts login --mfa 123456
+
+# Same process, wait up to 5 minutes for a file
+bun src/index.ts login --mfa-file /tmp/sainsburys-mfa
+
+# After a previous login exited needs_human (resume file, no password stored)
+bun src/index.ts login --mfa 123456
 ```
 
-## Authenticate (one-time)
+A valid established session is reused. Refresh runs before another password post. There is no daily sign-in quota. If Sainsbury's challenges or flags the account, the process exits `needs_human` (12) or `account_flagged` (15) and stops.
+
+Cookie import, when you already have a session and do not want to sign in:
 
 ```bash
-sainsburys login                 # visible local window; complete MFA yourself
-sainsburys login --ws ws://host:9222   # same, in a remote CDP browser
-SAINSBURYS_CDP_ONLY=1 SAINSBURYS_WS=ws://127.0.0.1:9222 sainsburys whoami # Pi-safe CDP-only mode
-
-# headless / CI — CLI fills the form itself; creds via env only (never argv):
-SAINSBURYS_USERNAME=you@example.com SAINSBURYS_PASSWORD='...' sainsburys login
-SAINSBURYS_USERNAME=... SAINSBURYS_PASSWORD=... sainsburys login --mfa 123456  # pre-supply OTP
-# Agent-friendly MFA handoff: the process prints MFA_REQUIRED, then waits for the file
-SAINSBURYS_USERNAME=... SAINSBURYS_PASSWORD=... sainsburys login --ws ws://127.0.0.1:9222 --mfa-file /tmp/sainsburys-mfa
-
-# or, no browser at all:
-sainsburys import-cookie-header "WC_AUTHENTICATION_...=...; JSESSIONID=..." -t <wcauthtoken>
-# or env: SAINSBURYS_COOKIE / SAINSBURYS_WCAUTHTOKEN
+bun src/index.ts import-cookie-header "WC_AUTHENTICATION_...=...; JSESSIONID=..." -t '<wcauthtoken>'
 ```
 
-Headless credential mode pauses for the SMS/app OTP if `--mfa` isn't given and a
-terminal is attached. For Hermes or another non-interactive agent, pass
-`--mfa-file <path>`: it prints `MFA_REQUIRED`, polls that file, and continues as
-soon as the user/agent writes the code. On failure it saves a screenshot to
-`~/.sainsburys/login-debug.png` for diagnosis.
-
-Session persists to `~/.sainsburys/session.json` (chmod 600). Verify with
-`sainsburys whoami`, re-login roughly weekly when it expires.
+`__Host-` cookies are stored host-only. Putting a Domain on them is what makes Chromium report invalid cookie fields.
 
 ## Commands
 
 | Task | Command |
 |---|---|
-| view one order in full | `orders view <orderId>` or `orders view latest` |
-| search order history | `orders find "mushy peas" --pages 3` |
-| orders history | `orders list [-n 10]` / `orders latest` |
-| search | `search "oat milk" -n 5 [--json]` |
-| basket | `basket view` · `basket add "milk" -q 2` · `basket remove <item_uid>` |
-| amend upcoming order | `amend add "<query or uid>" -q 2` |
-| slots | `slots reservation` · `slots list [-p POSTCODE]` · `slots book <id\|regex> [--dry-run]` · `slots cancel` |
-| diagnostics | `doctor api` · `doctor lightpanda [--ws ws://127.0.0.1:9222]` |
+| who you are | `whoami` |
+| search | `search "oat milk" -n 5` |
+| basket | `basket view` · `basket add "<query or uid>" -q 1` · `basket remove <item_uid>` |
+| amend upcoming order | `amend add "<query or uid>" -q 1` |
+| slots | `slots reservation` · `slots list` · `slots book <id>` · `slots cancel` |
+| orders | `orders list` · `orders find "<text>"` · `orders view <id\|latest>` |
+| checkout | `checkout preview` then `checkout confirm --token <hash>` |
+| refresh | `refresh` (no password) |
+| Akamai check | `doctor akamai` |
+| API check | `doctor api` |
+| clear a sticky flag | `account-flag status` · `account-flag clear --acknowledge` |
+| MCP | `mcp` or `mcp --http --port 8787` |
 
-Global flags: `--json -v --ws <url> --cdp-only --headed --browser --http --session <path>`.
+Global flags: `--json`, `-v` / `--verbose`, `--debug`, `--trace <path>`, `--session <path>`. `--http` exists only on `mcp` and means the local JSON-RPC server. Plain `fetch` is used inside `doctor akamai` so it can be compared with impersonation. It is not a transport for real work.
 
-## Amend semantics
+With a booked slot, `basket add` amends the upcoming order. The CLI prints `next-delivery` or `basket`.
 
-With a booked slot, adding items amends the **upcoming order** (Sainsbury's models
-pre-checkout amendments this way); without one, items go to the plain basket. The CLI
-prints which target was used (`-> next-delivery` / `-> basket`). Checkout/payment is
-intentionally out of scope.
+## MCP tools
 
-## How it talks to Sainsbury's
+`whoami`, `search`, `basket_view`, `basket_add`, `basket_remove`, `slots_view`, `orders_view`, `checkout_preview`, `checkout_confirm`, `login`, `submit_otp`.
 
-Akamai (their WAF) denies non-browser TLS fingerprints — plain `fetch` from
-Bun/Node/curl gets `403 Access Denied` at the edge — and also denies
-`HeadlessChrome` user agents.
+stdio is newline-delimited JSON-RPC `2024-11-05`. HTTP listens on `127.0.0.1` and answers `GET /health`.
 
-| Transport | Flag | Browser needed | Notes |
-|---|---|---|---|
-| **koonjs** (default) | — | **No** | Rust/BoringSSL Chrome JA3+H2 impersonation via napi-rs; native under Node & Bun |
-| remote CDP page | `--ws ws://host:9222` | Remote only | In-page `fetch()` on a warmed groceries SPA page in any CDP browser incl. LightPanda |
-| local Chromium page | `--browser` (+`--headed`) | Yes, local | Same as above with auto-discovered Playwright Chromium |
-| raw fetch | `--http` | No | Usually edge-denied; kept for tolerant networks/proxies |
+## Akamai
 
-On Raspberry Pi, use `--cdp-only` with a Chromium-compatible CDP endpoint. This
-prevents the CLI from trying to load the optional native `koonjs` module.
+The edge blocks the TLS/HTTP2 fingerprint, not a missing header. Plain Python `requests` and plain `fetch` get `403` HTML `Access Denied` on `/gol-ui/oauth/login` and on the profile URL. Chrome impersonation (`koonjs`, same idea as `curl_cffi` impersonate `chrome`) gets `200`. An unauthenticated profile is JSON with `user_id` `-1002`. That is a guest, not a block.
 
-### Agent MFA handoff
+`doctor akamai` prints both labels. Exit 13 when the impersonated call is still `akamai_blocked`. Do not open a browser to get past that.
 
-The MFA code is entered into the already-running login process. Do not invoke
-`login` a second time after the code arrives, because that can create a new
-challenge. Start one process with a new empty file, keep it running, and have
-the agent ask you for the code when it sees `MFA_REQUIRED`:
+## Session files
 
-```bash
-MFA_FILE=/tmp/sainsburys-mfa.$$
-rm -f "$MFA_FILE"
-SAINSBURYS_USERNAME=... SAINSBURYS_PASSWORD=... \
-  sainsburys --cdp-only --ws "$SAINSBURYS_WS" login --mfa-file "$MFA_FILE" \
-  > /tmp/sainsburys-login.log 2>&1 &
-# after the agent receives the MFA code from you:
-printf '%s\n' '<code>' > "$MFA_FILE"
-```
+Under `~/.sainsburys/` (or `SAINSBURYS_HOME`, or next to `--session`):
 
-The waiting process submits the code in the existing browser page, saves the
-session, and subsequent CDP commands reuse it. Verify with `sainsburys --cdp-only whoami`.
-
-In the normal mode only `login` needs a visible browser; everything else is plain
-authenticated REST over an impersonated TLS session (~0.8s per command). In
-`--cdp-only` mode, all commands intentionally use the CDP browser's session.
-
-### Runtimes
-
-One transport, no split — [`koonjs`](https://github.com/scrape-hub/koon) runs
-natively under both runtimes:
-
-| Invocation | Notes |
+| File | What |
 |---|---|
-| `node src/index.ts ...` / installed bin | in-process (Node >= 20 type-stripping) |
-| `bun src/index.ts ...` / `bunx --bun sainsburys` | in-process |
+| `session.json` | cookies, `wcauthtoken`, tokens. Mode 600. `established: false` is not reused. |
+| `session.json.lock` | one writer at a time |
+| `mfa-resume.json` | challenge, verifier, cookies. No password. |
+| `account-flagged.json` | sticky stop until `account-flag clear --acknowledge` |
+| `checkout-preview.json` | token for confirm |
+| `api-map.json` | confirm endpoint, after a HAR import |
+| `traces/` | sanitised JSONL |
 
-### Containers
+Set-Cookie from every response is merged back into the session. The jar belongs to this process. koon's own jar is off.
 
-No browser in the image; auth comes in via mount or env:
+## Traces
 
-```dockerfile
-# any node:*-slim base works; koonjs ships napi prebuilds for linux x64/arm64
-RUN npm i -g sainsburys-groceries-cli
-```
+`--verbose` and `--debug` write a sanitised JSONL file and print `trace: <path>` on stderr. Passwords, emails, cookies, tokens, and the login challenge are redacted. Confirm a trace does not contain the password before sending it back.
 
-```bash
-docker run -v ~/.sainsburys:/home/shopper/.sainsburys:ro ...          # mounted session
-docker run -e SAINSBURYS_COOKIE="..." -e SAINSBURYS_WCAUTHTOKEN="..." # or env
-```
+## What is still unverified live
 
-Set `TZ=Europe/London` for sane slot times. Sessions/cookies are gitignored
-and dockerignored.
-
-## LightPanda
-
-LightPanda exposes a CDP server (`lightpanda serve`, default `ws://127.0.0.1:9222`);
-the CLI accepts any such endpoint via `--ws`. Test acceptance end-to-end:
-
-```bash
-bunx lightpanda serve &    # or docker run -p 9222:9222 lightpanda/browser:latest
-sainsburys doctor lightpanda
-```
-
-Known caveats (see lightpanda-io/browser issues): `/json/list` may be missing,
-Playwright-over-Bun WebSocket instability, no screenshots/PDF rendering.
+MFA field names, the `refresh_token` grant, silent `GET /gol-ui/oauth/refresh`, how the authorization code becomes `WC_AUTHENTICATION_<userid>`, orders with the `wcauthtoken` header, checkout confirm, and how long a session lives. See [docs/architecture.md](docs/architecture.md), [docs/api-map.md](docs/api-map.md), and [docs/live-test-plan.md](docs/live-test-plan.md).
 
 ## Tests
 
 ```bash
-bun test           # offline unit tests
-bun run typecheck  # tsc --noEmit
+bun test
+bun run typecheck
 ```
+
+Fixtures under `fixtures/` are synthetic. Tests do not call Sainsbury's.
 
 ## Disclaimer
 
-Unofficial, undocumented APIs — for personal use with your own account only.
-Endpoints can change without notice; `doctor api` helps diagnose. Not
-affiliated with Sainsbury's Supermarkets Ltd.
+Unofficial APIs, for personal use with your own account. Not affiliated with Sainsbury's Supermarkets Ltd.

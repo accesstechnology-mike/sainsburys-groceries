@@ -1,0 +1,16 @@
+{
+  "basket_id": "basket-fixture-1",
+  "order_id": "order-fixture-1",
+  "subtotal_price": 1.5,
+  "total_price": 1.5,
+  "minimum_spend": 40,
+  "item_count": 1,
+  "items": [
+    {
+      "item_uid": "item-fixture-1",
+      "quantity": 1,
+      "subtotal_price": 1.5,
+      "product": { "sku": "12345678", "name": "Fixture oat drink 1L" }
+    }
+  ]
+}

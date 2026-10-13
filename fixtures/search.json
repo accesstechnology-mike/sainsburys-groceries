@@ -1,0 +1,13 @@
+{
+  "products": [
+    {
+      "product_uid": "12345678",
+      "name": "Fixture oat drink 1L",
+      "retail_price": { "price": 1.5 },
+      "in_stock": true
+    }
+  ],
+  "total": 1,
+  "page_number": 1,
+  "page_size": 24
+}
