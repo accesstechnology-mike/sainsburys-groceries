@@ -51,8 +51,11 @@ export async function importSessionToContext(
       .map((c) => ({
         name: c.name,
         value: c.value,
-        domain: c.domain ?? ".sainsburys.co.uk",
-        path: c.path ?? "/",
+        // __Host- cookies must be host-only (no Domain attribute) with path "/";
+        // Chromium rejects them with "Invalid cookie fields" if a domain is set.
+        ...(c.name.startsWith("__Host-")
+          ? { url: BASE_URL }
+          : { domain: c.domain ?? ".sainsburys.co.uk", path: c.path ?? "/" }),
         expires: c.expires && c.expires > 0 ? c.expires : -1,
         httpOnly: c.httpOnly ?? false,
         secure: c.secure ?? true,
