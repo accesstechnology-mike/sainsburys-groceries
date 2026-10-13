@@ -42,7 +42,8 @@ async function waitUntilAuthed(
 ): Promise<boolean> {
   while (Date.now() < deadline) {
     const cookies = await context.cookies(AUTH_ORIGINS);
-    if (cookies.some((c) => c.name.startsWith(AUTH_COOKIE_PREFIX))) return true;
+    // Guests also get WC_AUTHENTICATION_-1002; only a positive user id means signed in.
+    if (cookies.some((c) => /^WC_AUTHENTICATION_[1-9]\d*$/.test(c.name))) return true;
     await new Promise((r) => setTimeout(r, 1500));
   }
   return false;

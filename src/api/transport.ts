@@ -71,6 +71,15 @@ export class PageTransport implements Transport {
     url: string,
     opts: { body?: unknown; headers?: Record<string, string> } = {},
   ): Promise<TransportResponse> {
+    // Like the other transports, the API needs a wcauthtoken header. Take it
+    // from the live browser's logged-in WC_AUTHENTICATION_<id> cookie so a
+    // long-lived browser always sends its current token.
+    const headers: Record<string, string> = { ...(opts.headers ?? {}) };
+    if (!headers.wcauthtoken) {
+      const cookies = await this.page.context().cookies(["https://www.sainsburys.co.uk"]).catch(() => []);
+      const auth = cookies.find((c) => /^WC_AUTHENTICATION_[1-9]\d*$/.test(c.name));
+      if (auth) headers.wcauthtoken = auth.value;
+    }
     const result = await this.page.evaluate(
       async ({ url, method, body, headers }) => {
         const res = await fetch(url, {
@@ -82,7 +91,7 @@ export class PageTransport implements Transport {
         const text = await res.text();
         return { status: res.status, text };
       },
-      { url, method, body: opts.body as never, headers: opts.headers as never },
+      { url, method, body: opts.body as never, headers: headers as never },
     );
     return { status: result.status, text: result.text };
   }

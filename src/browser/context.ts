@@ -45,6 +45,11 @@ export async function importSessionToContext(
   context: PWContext,
   session: Session,
 ): Promise<void> {
+  // A long-lived browser (e.g. --ws to a persistent Chrome) keeps its own,
+  // fresher cookies. Overwriting them with a stale session file can log it out,
+  // so only import when the context is not already logged in.
+  const existing = await context.cookies([BASE_URL]).catch(() => []);
+  if (existing.some((c) => /^WC_AUTHENTICATION_[1-9]\d*$/.test(c.name))) return;
   await context.addCookies(
     session.cookies
       .filter((c) => c.name && c.value !== undefined)
@@ -95,4 +100,13 @@ export async function openWarmedGroceriesPage(context: PWContext): Promise<PWPag
   });
   await dismissCookieConsent(page).catch(() => {});
   return page;
+}
+
+/** Persist the context's current (logged-in) cookies back to the session file. */
+export async function writeBackSession(context: PWContext, sessionPath?: string): Promise<boolean> {
+  const { saveSession } = await import("../session/store.ts");
+  const session = await exportSessionFromContext(context);
+  if (!/^[1-9]/.test(session.cookies.find((c) => c.name.startsWith("WC_AUTHENTICATION_"))?.name.slice(18) ?? "")) return false;
+  saveSession({ ...session, source: "browser-login" }, sessionPath);
+  return true;
 }

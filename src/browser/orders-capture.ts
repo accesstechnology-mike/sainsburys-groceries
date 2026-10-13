@@ -1,6 +1,6 @@
 import { ORDERS_URL } from "../config.ts";
 import { dismissCookieConsent, connectBrowser, type ConnectOptions } from "./connect.ts";
-import { importSessionToContext } from "./context.ts";
+import { importSessionToContext, writeBackSession } from "./context.ts";
 import type { Session } from "../types.ts";
 
 /**
@@ -21,7 +21,7 @@ export class OrdersBrowserClient {
 
   static async open(
     session: Session,
-    opts: ConnectOptions & { timeoutMs?: number },
+    opts: ConnectOptions & { timeoutMs?: number; sessionPath?: string },
   ): Promise<OrdersBrowserClient> {
     const bs = await connectBrowser(opts);
     try {
@@ -60,6 +60,8 @@ export class OrdersBrowserClient {
       client.firstPage = (firstOrders as Record<string, unknown>[] | null) ?? undefined;
       // keep the browser alive for the lifetime of the client
       client.closeFn = async () => {
+        if (opts.ws) await writeBackSession(bs.context, opts.sessionPath).catch(() => {});
+        await page.close().catch(() => {});
         await bs.close().catch(() => {});
       };
       return client;

@@ -16,6 +16,7 @@ import {
   exportSessionFromContext,
   findChromiumExecutable,
   importSessionToContext,
+  writeBackSession,
   openWarmedGroceriesPage,
 } from "./browser/context.ts";
 import { interactiveLogin, credentialLogin } from "./browser/login.ts";
@@ -65,7 +66,11 @@ async function openClient(): Promise<OpenedClient> {
     const page = await openWarmedGroceriesPage(bs.context);
     return {
       client: new GroceriesClient({ session, transport: new PageTransport(page) }),
-      close: () => bs.close(),
+      close: async () => {
+        await writeBackSession(bs.context, opts.session).catch(() => {});
+        await page.close().catch(() => {});
+        await bs.close();
+      },
     };
   }
 
