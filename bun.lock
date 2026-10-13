@@ -6,14 +6,13 @@
       "name": "sainsburys-groceries-cli",
       "dependencies": {
         "commander": "^12.1.0",
-        "koonjs": "^0.8.1",
       },
       "devDependencies": {
         "@types/bun": "^1.1.10",
         "typescript": "^5.6.3",
       },
       "optionalDependencies": {
-        "playwright-core": "^1.49.0",
+        "koonjs": "^0.8.1",
       },
     },
   },
@@ -35,8 +34,6 @@
     "commander": ["commander@12.1.0", "", {}, "sha512-Vw8qHK3bZM9y/P10u3Vib8o/DdkvA2OtPtZvD871QKjy74Wj1WSKFILMPRPSdUSx5RFK1arlJzEtA4PkFgnbuA=="],
 
     "koonjs": ["koonjs@0.8.1", "", { "optionalDependencies": { "@koonjs/darwin-arm64": "0.8.1", "@koonjs/darwin-x64": "0.8.1", "@koonjs/linux-x64-gnu": "0.8.1", "@koonjs/win32-x64-msvc": "0.8.1" } }, "sha512-zXTmiQqUhkULH2JjmgM69gNnIKwMr3rjCWTmc/LIYxOB4HDJOT8vANorR1SK1huhz6xLzb7ez6Y4kipIUjbjgQ=="],
-
-    "playwright-core": ["playwright-core@1.62.1", "", { "bin": { "playwright-core": "cli.js" } }, "sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw=="],
 
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 

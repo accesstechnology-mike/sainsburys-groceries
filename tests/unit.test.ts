@@ -4,7 +4,7 @@ import {
   findWcauthtoken,
   parseCookieHeader,
 } from "../src/session/store.ts";
-import { parseSlotTexts } from "../src/browser/slots.ts";
+import { parseSlotTexts } from "../src/util/slots.ts";
 import { fmtPrice, priceOf, truncate } from "../src/util/format.ts";
 
 describe("cookie header parsing", () => {

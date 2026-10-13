@@ -1,14 +1,15 @@
-import { BASE_URL, DEFAULT_UA } from "../config.ts";
-import { buildCookieHeader } from "../session/store.ts";
+import { browserHeaders } from "./headers.ts";
+import { cookieHeaderForUrl } from "../session/cookies.ts";
 import type { Session } from "../types.ts";
 
 export interface TransportResponse {
   status: number;
   text: string;
+  headers: Record<string, string>;
+  setCookies: string[];
 }
 
 export interface Transport {
-  /** Perform an HTTP request against sainsburys.co.uk. */
   request(
     method: string,
     url: string,
@@ -17,80 +18,12 @@ export interface Transport {
   close(): Promise<void>;
 }
 
-export class ApiError extends Error {
-  status: number;
-  url: string;
-  body?: string;
-
-  constructor(
-    status: number,
-    url: string,
-    message: string,
-    body?: string,
-  ) {
-    super(`HTTP ${status} on ${url}: ${message}`);
-    this.name = "ApiError";
-    this.status = status;
-    this.url = url;
-    this.body = body;
-  }
-  get looksBlocked(): boolean {
-    return /access denied|captcha/i.test(this.body ?? "");
-  }
-}
-
-export class NoSessionError extends Error {
-  constructor() {
-    super(
-      "No Sainsbury's session. Run `sainsburys login`, or `sainsburys import-cookie-header` / set SAINSBURYS_COOKIE + SAINSBURYS_WCAUTHTOKEN.",
-    );
-    this.name = "NoSessionError";
-  }
-}
-
-type PWPage = import("playwright-core").Page;
+export { ApiError, NoSessionError } from "../errors.ts";
 
 /**
- * Primary transport: in-page fetch() executed on a page already loaded on
- * sainsburys.co.uk. Uses the browser's full network stack (TLS fingerprint,
- * header order, cookies) which is what Akamai validates — plain Node/Bun
- * fetch is TLS-fingerprint-denied, and APIRequestContext lacks sec-* headers.
- *
- * Works identically against a local headless Chromium or a remote CDP
- * browser (`--ws`, incl. LightPanda).
+ * Plain fetch. Akamai usually answers 403. Kept so `doctor akamai` can show
+ * that result next to the impersonated transport. Not a browser.
  */
-export class PageTransport implements Transport {
-  private page: PWPage;
-
-  constructor(page: PWPage) {
-    this.page = page;
-  }
-
-  async request(
-    method: string,
-    url: string,
-    opts: { body?: unknown; headers?: Record<string, string> } = {},
-  ): Promise<TransportResponse> {
-    const result = await this.page.evaluate(
-      async ({ url, method, body, headers }) => {
-        const res = await fetch(url, {
-          method,
-          credentials: "include",
-          headers: headers as Record<string, string> | undefined,
-          body: body === undefined || body === null ? undefined : JSON.stringify(body),
-        });
-        const text = await res.text();
-        return { status: res.status, text };
-      },
-      { url, method, body: opts.body as never, headers: opts.headers as never },
-    );
-    return { status: result.status, text: result.text };
-  }
-
-  async close(): Promise<void> {}
-}
-
-/** Fallback direct transport (works only on networks where Akamai tolerates non-browser TLS, e.g. some UK residential setups or via proxy). */
 export class FetchTransport implements Transport {
   private session: Session | null;
 
@@ -103,25 +36,107 @@ export class FetchTransport implements Transport {
     url: string,
     opts: { body?: unknown; headers?: Record<string, string> } = {},
   ): Promise<TransportResponse> {
-    const headers: Record<string, string> = {
-      "user-agent": DEFAULT_UA,
-      accept: "application/json, text/plain, */*",
-      "accept-language": "en-GB,en;q=0.9",
-      origin: BASE_URL,
-      referer: `${BASE_URL}/gol-ui/`,
-      ...(opts.headers ?? {}),
-    };
-    const cookies = this.session ? buildCookieHeader(this.session.cookies) : "";
-    if (cookies && !("cookie" in headers)) headers.cookie = cookies;
-
+    const headers = applySessionHeaders(url, this.session, opts, method);
     const res = await fetch(url, {
       method,
       headers,
-      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      body:
+        method === "GET" || method === "HEAD" || opts.body === undefined
+          ? undefined
+          : typeof opts.body === "string"
+            ? opts.body
+            : JSON.stringify(opts.body),
+      redirect: "manual",
       signal: AbortSignal.timeout(20_000),
     });
-    return { status: res.status, text: await res.text() };
+    const setCookies = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
+    const flat: Record<string, string> = {};
+    res.headers.forEach((value, key) => {
+      if (key.toLowerCase() !== "set-cookie") flat[key] = value;
+    });
+    return { status: res.status, text: await res.text(), headers: flat, setCookies };
   }
 
   async close(): Promise<void> {}
+}
+
+export function applySessionHeaders(
+  url: string,
+  session: Session | null,
+  opts: { body?: unknown; headers?: Record<string, string> },
+  method: string,
+): Record<string, string> {
+  const extras: Record<string, string> = { ...(opts.headers ?? {}) };
+  if (
+    opts.body !== undefined &&
+    method !== "GET" &&
+    method !== "HEAD" &&
+    !extras["content-type"] &&
+    typeof opts.body !== "string"
+  ) {
+    extras["content-type"] = "application/json";
+  }
+  if (session?.wcauthtoken && !extras.wcauthtoken) extras.wcauthtoken = session.wcauthtoken;
+  if (session?.accessToken && !extras.authorization) extras.authorization = `Bearer ${session.accessToken}`;
+  if (session?.cookies?.length && !extras.cookie) {
+    const cookie = cookieHeaderForUrl(session.cookies, url);
+    if (cookie) extras.cookie = cookie;
+  }
+  return browserHeaders(url, extras);
+}
+
+export function responseFromLoose(res: {
+  status?: number;
+  text?: (() => string | Promise<string>) | string;
+  headers?: unknown;
+}): Promise<TransportResponse> {
+  return normaliseLooseResponse(res);
+}
+
+export async function normaliseLooseResponse(res: {
+  status?: number;
+  text?: (() => string | Promise<string>) | string;
+  headers?: unknown;
+}): Promise<TransportResponse> {
+  const rawText = typeof res.text === "function" ? await res.text() : (res.text ?? "");
+  const { headers, setCookies } = readLooseHeaders(res.headers);
+  return {
+    status: Number(res.status ?? 0),
+    text: String(rawText),
+    headers,
+    setCookies,
+  };
+}
+
+export function readLooseHeaders(input: unknown): { headers: Record<string, string>; setCookies: string[] } {
+  const headers: Record<string, string> = {};
+  const setCookies: string[] = [];
+  const bag = typeof input === "function" ? (input as () => unknown)() : input;
+  if (!bag) return { headers, setCookies };
+  if (Array.isArray(bag)) {
+    for (const item of bag) {
+      if (!item || typeof item !== "object") continue;
+      const name = String((item as { name?: unknown }).name ?? "").toLowerCase();
+      const value = String((item as { value?: unknown }).value ?? "");
+      if (!name) continue;
+      pushHeader(headers, setCookies, name, value);
+    }
+    return { headers, setCookies };
+  }
+  if (typeof bag !== "object") return { headers, setCookies };
+  const entries = bag instanceof Map ? [...bag.entries()] : Object.entries(bag as Record<string, unknown>);
+  for (const [key, value] of entries) {
+    const name = String(key).toLowerCase();
+    const values = Array.isArray(value) ? value.map(String) : [String(value ?? "")];
+    for (const item of values) pushHeader(headers, setCookies, name, item);
+  }
+  return { headers, setCookies };
+}
+
+function pushHeader(headers: Record<string, string>, setCookies: string[], name: string, value: string): void {
+  if (name === "set-cookie") {
+    if (value) setCookies.push(value);
+    return;
+  }
+  headers[name] = headers[name] ? `${headers[name]}, ${value}` : value;
 }

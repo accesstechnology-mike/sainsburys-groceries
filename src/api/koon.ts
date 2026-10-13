@@ -1,27 +1,32 @@
-import type { Transport } from "./transport.ts";
-import { buildCookieHeader } from "../session/store.ts";
+import { applySessionHeaders, normaliseLooseResponse, type Transport, type TransportResponse } from "./transport.ts";
 import type { Session } from "../types.ts";
 
 /**
  * Default transport: koonjs (Rust/BoringSSL via napi-rs) reproducing Chrome's
- * TLS + HTTP/2 fingerprints. Works identically under Node and Bun — no
- * sidecar, no runtime split.
+ * TLS + HTTP/2 fingerprints. No browser process.
  */
 export class KoonTransport implements Transport {
   private session: Session | null;
-  private clientPromise: Promise<any> | null = null;
+  private clientPromise: Promise<KoonLike> | null = null;
 
   constructor(session: Session | null) {
     this.session = session;
   }
 
-  private async getClient(): Promise<any> {
+  private async getClient(): Promise<KoonLike> {
     if (!this.clientPromise) {
       this.clientPromise = (async () => {
-        const mod: any = await import("koonjs");
+        const mod: KoonModule = await import("koonjs");
         const Koon = mod.Koon ?? mod.default?.Koon;
-        if (!Koon) throw new Error("koonjs: Koon export not found");
-        return new Koon({ browser: "chrome" });
+        if (!Koon) throw new Error("koonjs: Koon export not found. Install optional dependency koonjs, or pass --http.");
+        return new Koon({
+          browser: "chrome",
+          // Login needs the 302/303 itself. Akamai's block is the TLS fingerprint.
+          followRedirects: false,
+          cookieJar: false,
+          locale: "en-GB",
+          onRedirect: () => false,
+        });
       })();
     }
     return this.clientPromise;
@@ -31,19 +36,47 @@ export class KoonTransport implements Transport {
     method: string,
     url: string,
     opts: { body?: unknown; headers?: Record<string, string> } = {},
-  ): Promise<{ status: number; text: string }> {
+  ): Promise<TransportResponse> {
     const client = await this.getClient();
-    const headers: Record<string, string> = { ...(opts.headers ?? {}) };
-    if (this.session?.cookies?.length && !headers.cookie) {
-      headers.cookie = buildCookieHeader(this.session.cookies);
-    }
+    const headers = applySessionHeaders(url, this.session, opts, method);
     const m = method.toUpperCase();
-    const res =
-      opts.body !== undefined
-        ? await client.request(m, url, JSON.stringify(opts.body), { headers, timeout: 40 })
-        : await client.request(m, url, undefined, { headers, timeout: 40 });
-    return { status: res.status, text: res.text() };
+    const payload =
+      opts.body === undefined || m === "GET" || m === "HEAD"
+        ? undefined
+        : typeof opts.body === "string"
+          ? opts.body
+          : JSON.stringify(opts.body);
+    const res = await client.request(m, url, payload, { headers, timeout: 40 });
+    return normaliseLooseResponse(res);
   }
 
   async close(): Promise<void> {}
+}
+
+interface KoonLike {
+  request(
+    method: string,
+    url: string,
+    body: string | undefined,
+    opts: { headers: Record<string, string>; timeout: number },
+  ): Promise<{ status?: number; text?: (() => string | Promise<string>) | string; headers?: unknown }>;
+}
+
+interface KoonModule {
+  Koon?: new (opts: {
+    browser: string;
+    followRedirects?: boolean;
+    cookieJar?: boolean;
+    locale?: string;
+    onRedirect?: () => boolean;
+  }) => KoonLike;
+  default?: {
+    Koon?: new (opts: {
+      browser: string;
+      followRedirects?: boolean;
+      cookieJar?: boolean;
+      locale?: string;
+      onRedirect?: () => boolean;
+    }) => KoonLike;
+  };
 }

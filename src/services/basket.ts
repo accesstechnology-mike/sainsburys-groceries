@@ -1,4 +1,5 @@
 import { GroceriesClient } from "../api/client.ts";
+import { SainsburysError } from "../errors.ts";
 import type { Reservation } from "../types.ts";
 
 export interface AddResult {
@@ -23,8 +24,8 @@ export async function smartAdd(
   let reservation: Reservation | null = null;
   try {
     reservation = await client.getReservation();
-  } catch {
-    // not logged in or no postcode set yet; treat as plain basket
+  } catch (err) {
+    if (err instanceof SainsburysError) throw err;
   }
 
   const hasBookedSlot =

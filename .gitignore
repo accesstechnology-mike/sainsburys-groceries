@@ -4,5 +4,8 @@ node_modules/
 # never commit sessions/cookies
 session.json
 *.session.json
+mfa-resume.json
+account-flagged.json
 .env
 .scratch/
+traces/

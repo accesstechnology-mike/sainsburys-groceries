@@ -11,11 +11,27 @@ export const LOGIN_URL = `${UI_BASE}/oauth/login`;
 export const ORDERS_URL = `${UI_BASE}/my-account/orders`;
 export const SLOTS_URL = `${UI_BASE}/slotselection`;
 
+export function sainsburysHome(): string {
+  return process.env.SAINSBURYS_HOME ?? path.join(os.homedir(), ".sainsburys");
+}
+
 export function defaultSessionPath(): string {
-  return (
-    process.env.SAINSBURYS_SESSION_PATH ??
-    path.join(os.homedir(), ".sainsburys", "session.json")
-  );
+  return process.env.SAINSBURYS_SESSION_PATH ?? path.join(sainsburysHome(), "session.json");
+}
+
+export function statePaths(sessionPath = defaultSessionPath()) {
+  const home = path.dirname(sessionPath);
+  return {
+    home,
+    sessionPath,
+    lockPath: `${sessionPath}.lock`,
+    flagPath: path.join(home, "account-flagged.json"),
+    previewPath: path.join(home, "checkout-preview.json"),
+    apiMapPath: process.env.SAINSBURYS_API_MAP ?? path.join(home, "api-map.json"),
+    mfaResumePath: path.join(home, "mfa-resume.json"),
+    mfaMapPath: process.env.SAINSBURYS_MFA_MAP ?? path.join(home, "mfa-map.json"),
+    traceDir: path.join(home, "traces"),
+  };
 }
 
 export interface GlobalOptions {

@@ -1,0 +1,12 @@
+{
+  "orders": [
+    {
+      "order_uid": "order-fixture-1",
+      "status": "delivered",
+      "slot_start_time": "2026-10-01T08:00:00Z",
+      "slot_end_time": "2026-10-01T10:00:00Z",
+      "total": 12.4,
+      "is_in_amend_mode": false
+    }
+  ]
+}

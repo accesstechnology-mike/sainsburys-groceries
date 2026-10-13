@@ -7,15 +7,35 @@ export interface SessionCookie {
   httpOnly?: boolean;
   secure?: boolean;
   sameSite?: "Strict" | "Lax" | "None";
+  /** `__Host-` cookies must not carry a Domain attribute. */
+  hostOnly?: boolean;
+  /** Host that set a host-only cookie. Import from a raw header uses www. */
+  host?: string;
 }
+
+export type SessionSource =
+  | "http-login"
+  | "cookie-import"
+  | "env"
+  | "refresh"
+  | "browser-login"
+  | "unknown";
 
 export interface Session {
   cookies: SessionCookie[];
   wcauthtoken: string;
-  /** ISO timestamp after which the session is presumed dead */
+  accessToken?: string;
+  refreshToken?: string;
+  idToken?: string;
+  tokenType?: string;
+  /** ISO timestamp after which the access token is presumed dead */
   expiresAt?: string;
   lastLogin?: string;
-  source: "browser-login" | "cookie-import" | "env" | "unknown";
+  lastRefreshAt?: string;
+  lastValidatedAt?: string;
+  /** False when tokens were stored but profile was still a guest. Not reused. */
+  established?: boolean;
+  source: SessionSource;
 }
 
 export interface Product {
