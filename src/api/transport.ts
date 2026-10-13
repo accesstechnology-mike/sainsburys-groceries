@@ -113,6 +113,9 @@ export class FetchTransport implements Transport {
     };
     const cookies = this.session ? buildCookieHeader(this.session.cookies) : "";
     if (cookies && !("cookie" in headers)) headers.cookie = cookies;
+    if (this.session?.wcauthtoken && !("wcauthtoken" in headers)) {
+      headers.wcauthtoken = this.session.wcauthtoken;
+    }
 
     const res = await fetch(url, {
       method,

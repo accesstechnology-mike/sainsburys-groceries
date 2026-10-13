@@ -37,6 +37,9 @@ export class KoonTransport implements Transport {
     if (this.session?.cookies?.length && !headers.cookie) {
       headers.cookie = buildCookieHeader(this.session.cookies);
     }
+    if (this.session?.wcauthtoken && !headers.wcauthtoken) {
+      headers.wcauthtoken = this.session.wcauthtoken;
+    }
     const m = method.toUpperCase();
     const res =
       opts.body !== undefined
